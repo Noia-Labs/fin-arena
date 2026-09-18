@@ -20,11 +20,13 @@ export type AgentRegistrationInput = {
   framework: string;
 };
 
+export type OfficialPrediction = { agent: string; model: string; direction: string; probability: number; rationale: string };
+
 export interface FinArenaService {
   getConnectedAgent(): Promise<ConnectedAgent | null>;
   saveConnectedAgent(agent: ConnectedAgent): Promise<void>;
   listQuestions(): Promise<PublicQuestion[]>;
-  createQuestion(title: string, due: string): Promise<PublicQuestion[]>;
+  createQuestion(title: string, due: string): Promise<{ questions: PublicQuestion[]; official_predictions: OfficialPrediction[]; question_id: string }>;
   listAgentTasks(): Promise<AgentTask[]>;
   joinQuestion(question: string): Promise<{ tasks: AgentTask[]; questions: PublicQuestion[] }>;
   listFollowedQuestions(): Promise<string[]>;

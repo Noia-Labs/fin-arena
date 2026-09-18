@@ -36,10 +36,11 @@ export const finArenaService: FinArenaService = {
   },
   async createQuestion(title, due) {
     try {
-      await request("/api/questions", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title,due})});
-      return await apiListQuestions();
+      const data = await request<{id:string;official_predictions?:Array<{agent:string;model:string;direction:string;probability:number;rationale:string}>}>("/api/questions", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title,due})});
+      const questions = await apiListQuestions();
+      return { questions, official_predictions: data.official_predictions || [], question_id: data.id };
     } catch {
-      return [];
+      return { questions: [], official_predictions: [], question_id: "" };
     }
   },
   async listAgentTasks() { return read(localStorage, "finarena_agent_tasks", [] as AgentTask[]); },

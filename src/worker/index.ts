@@ -122,7 +122,20 @@ app.post("/api/questions", async (c) => {
   await c.env.DB.prepare(
     "INSERT INTO questions (id, source, tag, title, due, agents, yes, status, outcome) VALUES (?, '用户提问', '用户预测', ?, ?, 0, 50, 'open', NULL)"
   ).bind(id, title, due).run();
-  return c.json({ id, source: "用户提问", tag: "用户预测", title, due, agents: 0, yes: 50, status: "open", outcome: null });
+
+  // 触发三个官方 Agent 预测
+  let officialPredictions: Array<{ agent: string; model: string; direction: string; probability: number; rationale: string }> = [];
+  const apiKey = c.env.ARK_API_KEY;
+  if (apiKey) {
+    officialPredictions = await runOfficialPredictions(c.env.DB, apiKey, id, title);
+    // 更新问题的参与人数与 YES 占比
+    const { results: allPreds } = await c.env.DB.prepare("SELECT direction FROM predictions WHERE question_id = ?").bind(id).all<{ direction: string }>();
+    const yesCount = allPreds.filter((p) => p.direction === "YES").length;
+    const yesPct = Math.round((yesCount / allPreds.length) * 100);
+    await c.env.DB.prepare("UPDATE questions SET agents = ?, yes = ? WHERE id = ?").bind(allPreds.length, yesPct, id).run();
+  }
+
+  return c.json({ id, source: "用户提问", tag: "用户预测", title, due, agents: officialPredictions.length, yes: 50, status: "open", outcome: null, official_predictions: officialPredictions });
 });
 
 app.get("/api/questions/:id/predictions", async (c) => {
@@ -210,6 +223,77 @@ function computeCalibration(predictions: { direction: string; probability: numbe
     return { range: `${i * 10}-${(i + 1) * 10}%`, count: b.count, predicted: Math.round(avgProb * 1000) / 1000, actual: Math.round(actualRate * 1000) / 1000 };
   });
   return { ece: total ? Math.round((ece / total) * 1000) / 1000 : 0, buckets };
+}
+
+// ---------------------------------------------------------------------------
+// 官方 Agent 预测：调用火山引擎 Ark API 获取方向/概率/理由
+// ---------------------------------------------------------------------------
+const ARK_BASE = "https://ark.cn-beijing.volces.com/api/coding/v3";
+
+async function predictWithLLM(apiKey: string, model: string, question: string): Promise<{ direction: "YES" | "NO"; probability: number; rationale: string }> {
+  const prompt = `你是一个金融预测助手。请针对以下问题给出预测。
+
+问题：${question}
+
+请严格以 JSON 格式输出，包含三个字段：
+- "direction": "YES" 或 "NO"，表示你对问题答案的判断方向
+- "probability": 0.5 到 1.0 之间的数字，表示你对该方向的置信概率
+- "rationale": 不超过 150 字的中文理由
+
+只输出 JSON，不要其他文字。`;
+
+  try {
+    const resp = await fetch(`${ARK_BASE}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0.3, max_tokens: 800 }),
+    });
+    if (!resp.ok) throw new Error(`ARK ${resp.status}`);
+    const data = await resp.json() as any;
+    const msg = data?.choices?.[0]?.message;
+    const content = (msg?.content || msg?.reasoning_content || "") as string;
+    // 提取 JSON
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const obj = JSON.parse(jsonMatch[0]);
+      const direction: "YES" | "NO" = String(obj.direction || "").toUpperCase() === "NO" ? "NO" : "YES";
+      let probability = Number(obj.probability);
+      if (!isFinite(probability) || probability < 0.5) probability = 0.55;
+      if (probability > 1) probability = 1;
+      return { direction, probability: Math.round(probability * 100) / 100, rationale: String(obj.rationale || content).slice(0, 300) };
+    }
+    // 回退：从文本中推断
+    const yesMatch = content.match(/(会|是|上涨|降息|通过|增长|超过|创新高)/);
+    const direction: "YES" | "NO" = yesMatch ? "YES" : "NO";
+    const probMatch = content.match(/(\d{1,3})\s*%/);
+    const probability = probMatch ? Math.min(1, Math.max(0.5, Number(probMatch[1]) / 100)) : 0.55;
+    return { direction, probability: Math.round(probability * 100) / 100, rationale: content.slice(0, 300) };
+  } catch (e) {
+    console.error(`[predictWithLLM] ${model} failed:`, e);
+    return { direction: "YES", probability: 0.55, rationale: `模型调用失败，使用默认预测。` };
+  }
+}
+
+// 官方 Agent 列表
+const OFFICIAL_AGENTS = [
+  { id: "official-deepseek", name: "DeepSeek Flash", model: "deepseek-v4-flash" },
+  { id: "official-glm", name: "GLM Flash", model: "glm-5.3-flash" },
+  { id: "official-kimi", name: "Kimi Preview", model: "kimi-k2.8-preview" },
+];
+
+async function runOfficialPredictions(db: D1Database, apiKey: string, questionId: string, questionTitle: string) {
+  const results = await Promise.allSettled(
+    OFFICIAL_AGENTS.map(async (agent) => {
+      const pred = await predictWithLLM(apiKey, agent.model, questionTitle);
+      const pid = `p-${uid()}`;
+      const createdAt = new Date().toISOString();
+      await db.prepare(
+        "INSERT INTO predictions (id, question_id, agent_id, agent_name, direction, probability, rationale, outcome, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'valid', ?)"
+      ).bind(pid, questionId, agent.id, agent.name, pred.direction, pred.probability, pred.rationale, createdAt).run();
+      return { agent: agent.name, model: agent.model, ...pred };
+    })
+  );
+  return results.map((r, i) => r.status === "fulfilled" ? r.value : { agent: OFFICIAL_AGENTS[i].name, model: OFFICIAL_AGENTS[i].model, direction: "YES", probability: 0.55, rationale: "预测失败" });
 }
 
 // ---------------------------------------------------------------------------
