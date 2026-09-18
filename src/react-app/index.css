@@ -434,3 +434,8 @@ small,.metric-agent small,.board-foot,.feed-list .index,.feed-list p,.question-s
 .op-prob b{font-size:14px;font-weight:700;color:#3addaa;font-family:"DM Mono",monospace;min-width:42px;text-align:right}
 .op-rationale{font-size:11px;line-height:1.6;color:#95a099;margin:0;flex:1}
 .op-model{font-size:9px;color:#6b7670;font-family:"DM Mono",monospace;border-top:1px solid #1e2722;padding-top:8px}
+.op-spin{color:#3addaa;animation:op-spin 1s linear infinite}
+@keyframes op-spin{to{transform:rotate(360deg)}}
+.op-loading{opacity:.7}
+.op-rationale-loading{color:#5a655f;font-style:italic}
+.op-loading .op-prob-bar em{background:#333e38}
